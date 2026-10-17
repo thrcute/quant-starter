@@ -13,16 +13,25 @@ class BTResult:
     equity: pd.Series
 
 def run_backtest(df: pd.DataFrame, cfg: Config) -> BTResult:
+    """Execute close signals at the next open; value equity after that execution.
+
+    Positions are long/flat. Fee plus slippage is a proportional equity haircut
+    at each entry/exit, preserving the existing simplified cost model. An open
+    final position is marked at the last open, without a forced exit or exit cost.
+    """
     sig = compute_signals(df, cfg)
+    # Position immediately AFTER trading at this row's open.
     pos = sig.long.shift(1).fillna(0)
     px = df["open"]
     ret = px.pct_change().fillna(0)
-    gross = pos * ret
+    # The previous position earned the move ending at this open.
+    gross = pos.shift(1).fillna(0) * ret
 
     trade_change = pos.diff().fillna(pos)
-    fee = (abs(trade_change) * cfg.fee_rate)
-    slippage = abs(trade_change) * cfg.slippage_pct
-    net = gross - fee - slippage
+    cost_rate = cfg.fee_rate + cfg.slippage_pct
+    cost = abs(trade_change) * cost_rate
+    # Mark the existing holding first, then deduct this open's trading cost.
+    net = (1 + gross) * (1 - cost) - 1
 
     equity = (1 + net).cumprod()
 
@@ -33,13 +42,13 @@ def run_backtest(df: pd.DataFrame, cfg: Config) -> BTResult:
             in_trade=True; entry_px=px.iloc[i]; entry_time=px.index[i]
         elif in_trade and pos.iloc[i-1]==1 and pos.iloc[i]==0:
             exit_px=px.iloc[i]; exit_time=px.index[i]
-            pnl=(exit_px-entry_px)/entry_px - 2*(cfg.fee_rate+cfg.slippage_pct)
+            pnl=(exit_px/entry_px) * (1-cost_rate)**2 - 1
             trades.append({"entry_time":entry_time,"entry_px":entry_px,"exit_time":exit_time,"exit_px":exit_px,"pnl_pct":pnl})
             in_trade=False
     trades_df = pd.DataFrame(trades)
 
     total_return = equity.iloc[-1]-1
-    daily_ret = net.resample("1D").sum(min_count=1).fillna(0)
+    daily_ret = (1 + net).resample("1D").prod() - 1
     sharpe = (daily_ret.mean() / (daily_ret.std() + 1e-9)) * np.sqrt(252)
     running_max = equity.cummax()
     dd = equity / running_max - 1
